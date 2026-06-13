@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Web crawler for polgroup.ru using Playwright (headless Chrome).
-Extracts: URL, title, meta description, content text.
-Output: CSV + JSON to OUTPUT_DIR.
+- Crawls structural HTML pages → extracts URL, title, meta, content text
+- Downloads PDF, RAR, MP4 files found on any page
+- Output: CSV + JSON (pages) + downloaded files in subfolders
 
 Install:
-    pip install playwright beautifulsoup4
+    pip install playwright beautifulsoup4 requests
     playwright install chromium
 Run:
     python crawler.py
@@ -15,9 +16,11 @@ import asyncio
 import csv
 import json
 import sys
+import re
 from pathlib import Path
-from urllib.parse import urljoin, urlparse, urlunparse, parse_qs, urlencode
+from urllib.parse import urljoin, urlparse, urlunparse, parse_qs
 
+import requests
 from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Page
 
@@ -26,22 +29,32 @@ OUTPUT_DIR = Path("D:/Documents/Сайт/ГРУПП") if sys.platform == "win32"
 DELAY = 1.0
 TIMEOUT = 20_000
 
-SKIP_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".zip",
-                   ".doc", ".docx", ".xls", ".xlsx", ".rar", ".mp4", ".svg", ".ico")
+SKIP_IMG_EXTENSIONS = (".jpg", ".jpeg", ".png", ".gif", ".svg", ".ico",
+                       ".doc", ".docx", ".xls", ".xlsx", ".zip")
 
-# Query params that generate duplicate/useless pages
+# These we DOWNLOAD, not skip
+DOWNLOAD_EXTENSIONS = (".pdf", ".rar", ".mp4")
+
+# Structural pages only (no individual product .html cards)
 SKIP_MODULES = {"sitemap", "news", "articles"}
-
-# Path prefixes that lead to product catalog pages (thousands of items)
 SKIP_PATH_PREFIXES = ("/Сайт/", "/catalog/", "/product/", "/tovar/")
+
+DOWNLOAD_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                  "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+}
 
 
 def normalize_url(url: str) -> str:
-    """Force https, strip trailing slash, remove fragment."""
     p = urlparse(url)
     normalized = p._replace(scheme="https", fragment="", netloc=p.netloc.lower())
     path = normalized.path.rstrip("/") or "/"
     return urlunparse(normalized._replace(path=path))
+
+
+def is_downloadable(url: str) -> bool:
+    path = urlparse(url).path.lower()
+    return any(path.endswith(ext) for ext in DOWNLOAD_EXTENSIONS)
 
 
 def is_crawlable(url: str) -> bool:
@@ -50,54 +63,82 @@ def is_crawlable(url: str) -> bool:
         return False
     if not p.netloc or p.netloc.replace("www.", "") != "polgroup.ru":
         return False
-    if any(url.lower().endswith(ext) for ext in SKIP_EXTENSIONS):
+    if any(urlparse(url).path.lower().endswith(ext) for ext in SKIP_IMG_EXTENSIONS + DOWNLOAD_EXTENSIONS):
         return False
-    # Skip individual .html product pages (e.g. /mtg63.html, /galoshi.html)
     if p.path.lower().endswith(".html"):
         return False
-    # Skip known catalog path prefixes
     if any(p.path.startswith(pfx) for pfx in SKIP_PATH_PREFIXES):
         return False
-    # Skip pagination and module pages like ?module=news&page=2
     qs = parse_qs(p.query)
-    module = qs.get("module", [""])[0]
-    if module in SKIP_MODULES:
+    if qs.get("module", [""])[0] in SKIP_MODULES:
         return False
     return True
 
 
-def collect_links(soup: BeautifulSoup, current_url: str) -> set[str]:
-    links: set[str] = set()
+def collect_links(soup: BeautifulSoup, current_url: str) -> tuple[set[str], set[str]]:
+    """Returns (crawlable_pages, downloadable_files)."""
+    pages: set[str] = set()
+    files: set[str] = set()
     for tag in soup.find_all("a", href=True):
         href = tag["href"].strip()
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
         full = normalize_url(urljoin(current_url, href))
-        if is_crawlable(full):
-            links.add(full)
-    return links
+        if is_downloadable(full):
+            files.add(full)
+        elif is_crawlable(full):
+            pages.add(full)
+    return pages, files
 
 
 def extract_data(url: str, html: str) -> dict:
     soup = BeautifulSoup(html, "html.parser")
-
     title = soup.title.string.strip() if soup.title and soup.title.string else ""
-
     meta_desc = ""
     meta = (soup.find("meta", attrs={"name": "description"}) or
             soup.find("meta", attrs={"property": "og:description"}))
     if meta:
         meta_desc = meta.get("content", "").strip()
-
     for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
         tag.decompose()
     body = soup.find("body")
     content = " ".join(body.get_text(separator=" ").split()) if body else ""
-
     return {"url": url, "title": title, "meta_description": meta_desc, "content": content}
 
 
-async def fetch(page: Page, url: str) -> str | None:
+def download_file(url: str, base_dir: Path) -> str:
+    """Download file, save to subfolder by type. Returns local path or error."""
+    path = urlparse(url).path.lower()
+    if path.endswith(".pdf"):
+        folder = base_dir / "PDF"
+    elif path.endswith(".rar"):
+        folder = base_dir / "RAR"
+    elif path.endswith(".mp4"):
+        folder = base_dir / "VIDEO"
+    else:
+        folder = base_dir / "FILES"
+    folder.mkdir(parents=True, exist_ok=True)
+
+    filename = Path(urlparse(url).path).name or "file"
+    # sanitize filename
+    filename = re.sub(r'[<>:"/\\|?*]', "_", filename)
+    dest = folder / filename
+
+    if dest.exists():
+        return f"EXISTS {dest}"
+    try:
+        r = requests.get(url, headers=DOWNLOAD_HEADERS, timeout=60, stream=True)
+        r.raise_for_status()
+        with open(dest, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+        size_kb = dest.stat().st_size // 1024
+        return f"OK {dest} ({size_kb} KB)"
+    except Exception as e:
+        return f"ERROR {e}"
+
+
+async def fetch_html(page: Page, url: str) -> str | None:
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=TIMEOUT)
         await asyncio.sleep(DELAY)
@@ -109,7 +150,8 @@ async def fetch(page: Page, url: str) -> str | None:
 
 async def crawl() -> list[dict]:
     start = normalize_url(BASE_URL)
-    visited: set[str] = set()
+    visited_pages: set[str] = set()
+    visited_files: set[str] = set()
     queue: list[str] = [start]
     results: list[dict] = []
 
@@ -128,23 +170,33 @@ async def crawl() -> list[dict]:
 
         while queue:
             url = queue.pop(0)
-            if url in visited:
+            if url in visited_pages:
                 continue
-            visited.add(url)
-            print(f"[{len(visited)}] {url}")
+            visited_pages.add(url)
+            print(f"[page {len(visited_pages)}] {url}")
 
-            html = await fetch(page, url)
+            html = await fetch_html(page, url)
             if html is None:
                 continue
 
             results.append(extract_data(url, html))
 
             soup = BeautifulSoup(html, "html.parser")
-            new_links = collect_links(soup, url) - visited
-            queue.extend(new_links)
+            new_pages, new_files = collect_links(soup, url)
+
+            queue.extend(new_pages - visited_pages)
+
+            # Download new files immediately
+            for file_url in new_files - visited_files:
+                visited_files.add(file_url)
+                print(f"  [download] {file_url}")
+                status = download_file(file_url, OUTPUT_DIR)
+                print(f"    → {status}")
 
         await browser.close()
 
+    print(f"\nPages crawled : {len(results)}")
+    print(f"Files found   : {len(visited_files)}")
     return results
 
 
@@ -154,7 +206,7 @@ def save_results(results: list[dict]) -> None:
     json_path = OUTPUT_DIR / "polgroup_pages.json"
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
-    print(f"\nJSON saved → {json_path}")
+    print(f"JSON saved → {json_path}")
 
     csv_path = OUTPUT_DIR / "polgroup_pages.csv"
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
@@ -162,7 +214,6 @@ def save_results(results: list[dict]) -> None:
         writer.writeheader()
         writer.writerows(results)
     print(f"CSV  saved → {csv_path}")
-    print(f"\nTotal pages crawled: {len(results)}")
 
 
 if __name__ == "__main__":

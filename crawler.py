@@ -23,7 +23,7 @@ from bs4 import BeautifulSoup
 from playwright.async_api import async_playwright, Page
 
 BASE_URL = "https://polgroup.ru"
-OUTPUT_DIR = Path("D:/Claude/Site") if sys.platform == "win32" else Path("./output")
+OUTPUT_DIR = Path("D:/Documents/Сайт/ГРУПП") if sys.platform == "win32" else Path("./output")
 DELAY = 1.5  # seconds between page loads
 TIMEOUT = 20_000  # ms
 

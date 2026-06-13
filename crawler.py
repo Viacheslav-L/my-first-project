@@ -65,8 +65,8 @@ def is_crawlable(url: str) -> bool:
         return False
     if any(urlparse(url).path.lower().endswith(ext) for ext in SKIP_IMG_EXTENSIONS + DOWNLOAD_EXTENSIONS):
         return False
-    if p.path.lower().endswith(".html"):
-        return False
+    # Skip .html pages inside subfolders (catalog with 4770 items is in /Сайт/)
+    # but allow root-level .html pages like /rti.html, /galoshi.html
     if any(p.path.startswith(pfx) for pfx in SKIP_PATH_PREFIXES):
         return False
     qs = parse_qs(p.query)

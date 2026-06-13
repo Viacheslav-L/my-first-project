@@ -32,6 +32,9 @@ SKIP_EXTENSIONS = (".pdf", ".jpg", ".jpeg", ".png", ".gif", ".zip",
 # Query params that generate duplicate/useless pages
 SKIP_MODULES = {"sitemap", "news", "articles"}
 
+# Path prefixes that lead to product catalog pages (thousands of items)
+SKIP_PATH_PREFIXES = ("/Сайт/", "/catalog/", "/product/", "/tovar/")
+
 
 def normalize_url(url: str) -> str:
     """Force https, strip trailing slash, remove fragment."""
@@ -48,6 +51,12 @@ def is_crawlable(url: str) -> bool:
     if not p.netloc or p.netloc.replace("www.", "") != "polgroup.ru":
         return False
     if any(url.lower().endswith(ext) for ext in SKIP_EXTENSIONS):
+        return False
+    # Skip individual .html product pages (e.g. /mtg63.html, /galoshi.html)
+    if p.path.lower().endswith(".html"):
+        return False
+    # Skip known catalog path prefixes
+    if any(p.path.startswith(pfx) for pfx in SKIP_PATH_PREFIXES):
         return False
     # Skip pagination and module pages like ?module=news&page=2
     qs = parse_qs(p.query)
